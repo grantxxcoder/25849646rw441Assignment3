@@ -209,3 +209,4 @@ __marimo__/
 report/
 *.pdf
 *.txt
+src/data/
