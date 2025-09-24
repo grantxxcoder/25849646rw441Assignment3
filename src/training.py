@@ -4,12 +4,13 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
+import tqdm
 def train_model(model, optimizer, criterion, X_train, y_train, X_validation, y_validation, epochs=50):
     train_acc = []
     val_acc = []
     train_losses = []
     val_losses = []
-    for epoch in range(epochs):
+    for epoch in tqdm.tqdm(range(epochs), desc="Training Progress"):
         model.train()
         optimizer.zero_grad()
         outputs = model(X_train)
@@ -57,7 +58,18 @@ def train_complex_model(model, optimizer, criterion, parameters, all_train_dfs, 
     test_acc = []
     train_losses = []
     val_losses = []
-    look_back = 30
+
+    # Extract parameters or set defaults
+    look_back = parameters.get('look_back', 30)
+    ma_window = parameters.get('ma_window', 10)
+    plateau_threshold = parameters.get('plateau_threshold', 1e-4)
+    underfit_threshold = parameters.get('underfit_threshold', 0.4)
+    overfit_gap_threshold = parameters.get('overfit_gap_threshold', 0.15)
+    max_plateau_count = parameters.get('max_plateau_count', 10)
+    min_neurons = parameters.get('min_neurons', 16)
+    lock_epochs_underfit = parameters.get('lock_epochs_underfit', 200)
+    lock_epochs_overfit = parameters.get('lock_epochs_overfit', 50)
+    final_plateau_stop_count = parameters.get('final_plateau_stop_count', 30)
 
     has_underfit = False
     has_overfit = False
@@ -102,6 +114,7 @@ def train_complex_model(model, optimizer, criterion, parameters, all_train_dfs, 
             combined_train_df = pd.concat([existing_train_df, new_class_df_train], axis=0).sample(frac=1).reset_index(drop=True)
             combined_test_df = pd.concat([existing_test_df, new_class_df_test], axis=0).sample(frac=1).reset_index(drop=True)
 
+
         # convert back to tensors with consistent column ordering
         X_train = torch.tensor(combined_train_df.drop(columns=[label]).values, dtype=torch.float32).to(device)
         y_train = torch.tensor(combined_train_df[label].values, dtype=torch.long).to(device)
@@ -113,16 +126,10 @@ def train_complex_model(model, optimizer, criterion, parameters, all_train_dfs, 
     combine_new_class_to_dataset(pd.DataFrame(all_train_dfs[0]), pd.DataFrame(all_test_dfs[0]))
     combine_new_class_to_dataset(pd.DataFrame(all_train_dfs[1]), pd.DataFrame(all_test_dfs[1]))
 
-    # X_train = torch.tensor(combined_train_df.drop(columns=[label]).values, dtype=torch.float32).to(device)
-    # y_train = torch.tensor(combined_train_df[label].values, dtype=torch.long).to(device)
-
-    # X_test = torch.tensor(combined_test_df.drop(columns=[label]).values, dtype=torch.float32).to(device)
-    # y_test = torch.tensor(combined_test_df[label].values, dtype=torch.long).to(device)
     print(f"Initial training with classes: {[df[label].iloc[0] for df in all_train_dfs[:2]]}, Train size: {X_train.shape[0]}, Test size: {X_test.shape[0]}")
     epoch = 0
 
-    while epoch < epochs:
-        epoch += 1
+    for epoch in tqdm.tqdm(range(epochs), desc="Training Progress"):
         model.train()
         optimizer.zero_grad()
         outputs = model(X_train)
@@ -145,10 +152,9 @@ def train_complex_model(model, optimizer, criterion, parameters, all_train_dfs, 
             train_losses.append(train_loss)
             val_losses.append(val_loss)
 
+
         # Loss-based decision logic replacing accuracy-only heuristics
         if epoch > look_back and not lock:
-            # moving-average window and helper
-            ma_window = min(10, look_back)
             if len(train_losses) >= ma_window:
                 # compute moving averages
                 ma_train = np.convolve(train_losses, np.ones(ma_window)/ma_window, mode='valid')
@@ -165,7 +171,7 @@ def train_complex_model(model, optimizer, criterion, parameters, all_train_dfs, 
                 gap = ma_val[-1] - ma_train[-1]
 
                 # plateau detection: both losses stop decreasing significantly
-                if abs(train_slope) < 1e-4 and abs(val_slope) < 1e-4:
+                if abs(train_slope) < plateau_threshold and abs(val_slope) < plateau_threshold:
                     has_plateaued = True
                     num_plateued += 1
                     if current_class_index > goal_classes:
@@ -174,8 +180,7 @@ def train_complex_model(model, optimizer, criterion, parameters, all_train_dfs, 
                         print("All classes have been added. Continuing training on final dataset.")
 
                 # UNDERFITTING (loss-based): both losses are high and decreasing slowly
-                # or both plateau but still high absolute loss
-                if (train_slope > -0.001 and val_slope > -0.001) and (ma_train[-1] > 0.4) and num_plateued >= 3:
+                if (train_slope > -plateau_threshold and val_slope > -plateau_threshold) and (ma_train[-1] > underfit_threshold) and num_plateued >= 3:
                     has_underfit = True
                     num_plateued = 0
                     final_plateau_count = 0
@@ -185,15 +190,21 @@ def train_complex_model(model, optimizer, criterion, parameters, all_train_dfs, 
                         optimizer = torch.optim.Adam(model.parameters(), lr=parameters['lr'])
                         print(f"[train] Model structure changed: added neurons. Hidden layers: {len(model.hidden_layers)}")
                         lock = True
-                        lock_epochs = 200
+                        lock_epochs = lock_epochs_underfit
 
                 # OVERFITTING (loss-based): train loss keeps decreasing but val loss increases (gap grows)
-                if (train_slope < -0.001 and val_slope > 0.001 and gap > 0.2) or (ma_train[-1] < 0.05 and gap > 0.2) or num_plateued > 20 or train_accuracy > 0.99:
+                if (train_slope < -plateau_threshold and val_slope > plateau_threshold and gap > overfit_gap_threshold) or num_plateued > max_plateau_count or train_accuracy > 0.99:
                     has_overfit = True
                     num_plateued = 0
                     final_plateau_count = 0
                     print(f"[train] Overfitting detected at epoch {epoch}. train_loss={ma_train[-1]:.4f}, val_loss={ma_val[-1]:.4f}, gap={gap:.4f}")
-                    if current_class_index <= goal_classes:
+                    if isinstance(model.hidden_layers[0], nn.Identity) or model.hidden_layers[0].out_features < min_neurons:
+                        print("[train] Adding neurons to prevent overfitting.")
+                        model.add_hidden_neurons()
+                        optimizer = torch.optim.Adam(model.parameters(), lr=parameters['lr'])
+                        lock = True
+                        lock_epochs = lock_epochs_overfit
+                    elif current_class_index <= goal_classes:
                         print(f"Adding new class {current_class_index} to the dataset.")
                         combine_new_class_to_dataset(all_train_dfs[current_class_index], all_test_dfs[current_class_index])
                         model.update_output_layer(len(torch.unique(y_train)))
@@ -202,20 +213,20 @@ def train_complex_model(model, optimizer, criterion, parameters, all_train_dfs, 
                         if current_class_index > goal_classes:
                             final_dataset_reached = True
                             print("Reached final combined dataset.")
-                        lock_epochs = 50
+                        lock_epochs = lock_epochs_overfit
                     else:
                         print("All classes have been added. Cannot add more classes. Continuing training.")
                         final_dataset_reached = True
                         lock = True
-                        lock_epochs = 20
+                        lock_epochs = lock_epochs_overfit
 
             # if any of the flags are set, lock further checks
             if has_underfit or has_overfit or has_plateaued:
                 lock = True
                 if has_underfit:
-                    lock_epochs = max(lock_epochs, 200)
+                    lock_epochs = max(lock_epochs, lock_epochs_underfit)
                 else:
-                    lock_epochs = max(lock_epochs, 10)
+                    lock_epochs = max(lock_epochs, lock_epochs_overfit)
         else:
             if lock:
                 lock_epochs -= 1
@@ -228,7 +239,7 @@ def train_complex_model(model, optimizer, criterion, parameters, all_train_dfs, 
         has_plateaued = False
 
         # optional stopping: if final dataset reached and we've seen multiple plateau detections, stop
-        if final_dataset_reached and final_plateau_count >= 30:
+        if final_dataset_reached and final_plateau_count >= final_plateau_stop_count:
             print("Final dataset plateaued multiple times — stopping training.")
             break
 
