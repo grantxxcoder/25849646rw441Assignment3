@@ -1,18 +1,30 @@
 
+from doctest import debug
 import torch
 import torch.nn as nn
+import numpy as np
+import random
 class DynamicMLP(nn.Module):
-    def __init__(self, input_dim, max_layers=3, activation=nn.ReLU):
+    def __init__(self, input_dim, max_layers=3, activation=nn.ReLU, seed=42, debug=False):
         super().__init__()
+        random.seed(seed)
+        np.random.seed(seed) 
+        torch.manual_seed(seed)  
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(seed) 
+            torch.cuda.manual_seed_all(seed)  
+        torch.backends.cudnn.deterministic = True  
+        torch.backends.cudnn.benchmark = False
+        
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.input_dim = input_dim
         self.hidden_layers = nn.ModuleList()
         self.hidden_layers.append(nn.Identity())
-        # initialize with a small output dimension; will be safely expanded later
         self.output_layer = nn.Linear(input_dim, 2).to(self.device)
         self.activation = activation()
         self.current_layer = 0 
         self.max_layers = max_layers
+        self.debug = debug
 
     def _expand_output_layer(self, new_in_features=None, new_out_features=None):
         """Expand the output layer to new input/out dims while preserving any overlapping weights.
@@ -59,7 +71,8 @@ class DynamicMLP(nn.Module):
             else:
                 new_layer_added = self.add_hidden_layer(1)
                 if not new_layer_added:
-                    print("Cannot add more layers or neurons.")
+                    if self.debug:
+                        print("Cannot add more layers or neurons.")
                     return False
                 self.current_layer += 1 
                 return True
@@ -67,15 +80,16 @@ class DynamicMLP(nn.Module):
         # update output layer to accept the new last hidden layer size (preserve weights)
         last_out = self.hidden_layers[-1].out_features if not isinstance(self.hidden_layers[-1], nn.Identity) else self.input_dim
         self._expand_output_layer(new_in_features=last_out)
-
-        print(f"Added neurons to layer {layer_idx}, new size: {self.hidden_layers[layer_idx].out_features}")
-        print(f"Output layer updated to {self.output_layer.in_features} -> {self.output_layer.out_features}")
+        if self.debug:
+            print(f"Added neurons to layer {layer_idx}, new size: {self.hidden_layers[layer_idx].out_features}")
+            print(f"Output layer updated to {self.output_layer.in_features} -> {self.output_layer.out_features}")
         return False
     
     def add_hidden_layer(self, n_neurons):
         # have a maximum amount of layers
         if len(self.hidden_layers) >= self.max_layers:
-            print("Maximum number of hidden layers reached.")
+            if self.debug:
+                print("Maximum number of hidden layers reached.")
             return False
         
         if not isinstance(self.hidden_layers[-1], nn.Identity):
@@ -97,7 +111,10 @@ class DynamicMLP(nn.Module):
         for idx, layer in enumerate(self.hidden_layers):
             layer_type = type(layer).__name__
             if isinstance(layer, nn.Identity):
-                print(f" Layer {idx}: Identity (no neurons)")
+                if self.debug:
+                    print(f" Layer {idx}: Identity (no neurons)")
             else:
-                print(f" Layer {idx}: {layer_type} with {layer.out_features} neurons")
-        print(f" Output Layer: Linear with {self.output_layer.out_features} output classes")
+                if self.debug:
+                    print(f" Layer {idx}: {layer_type} with {layer.out_features} neurons")
+        if self.debug:
+            print(f" Output Layer: Linear with {self.output_layer.out_features} output classes")
