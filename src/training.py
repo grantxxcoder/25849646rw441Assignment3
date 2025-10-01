@@ -5,8 +5,42 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 import tqdm
-def train_model(model, optimizer, criterion, X_train, y_train, X_validation, y_validation, epochs=50):
+def train_model(model, optimizer, criterion, X_train, y_train, X_validation, y_validation, epochs=50, goal_accuracy=None):
     train_acc = []
+    early_stop_patience = 10
+    early_stop_min_delta = 1e-4
+
+
+    def _early_stop_iter(it):
+        for i, v in enumerate(it):
+            # no validation loss yet -> allow first epoch
+            if len(val_losses) == 0:
+                yield v
+                continue
+
+            # find the last epoch index where validation loss improved by > min_delta
+            best = float("inf")
+            last_improve = None
+            for idx, loss in enumerate(val_losses):
+                if loss < best - early_stop_min_delta:
+                    best = loss
+                    last_improve = idx
+
+            if last_improve is None:
+                no_improve = len(val_losses)
+            else:
+                no_improve = len(val_losses) - 1 - last_improve
+
+            if no_improve >= early_stop_patience:
+                # Stop iterating (this will end the for-loop early)
+                try:
+                    print(f"Early stopping: no improvement in val loss for {early_stop_patience} epochs. Last val loss: {val_losses[-1]:.6f}")
+                except Exception:
+                    pass
+                break
+
+            yield v
+
     val_acc = []
     train_losses = []
     val_losses = []
@@ -27,6 +61,10 @@ def train_model(model, optimizer, criterion, X_train, y_train, X_validation, y_v
             val_acc.append(val_accuracy)
             train_losses.append(loss.item())
             val_losses.append(criterion(model(X_validation), y_validation).item())
+        
+        if goal_accuracy is not None and val_accuracy >= goal_accuracy:
+            print(f"Goal accuracy {goal_accuracy} reached at epoch {epoch}. Stopping training.")
+            break
 
     return train_acc, val_acc, train_losses, val_losses
 
@@ -74,7 +112,7 @@ def plot_learning_curves(train_acc, val_acc, train_losses, val_losses, title="Le
     plt.title(title)
     plt.show()
 
-def train_complex_model(model, optimizer, criterion, parameters, all_train_dfs, all_test_dfs, label='label', epochs=50, debug=False):
+def train_complex_model(model, optimizer, criterion, parameters, all_train_dfs, all_test_dfs, label='label', epochs=50, debug=False, goal_accuracy = None):
     device = next(model.parameters()).device
     train_acc = []
     val_acc = []
@@ -251,9 +289,18 @@ def train_complex_model(model, optimizer, criterion, parameters, all_train_dfs, 
                 elif debug:
                     print("[train] Plateau detected but no action needed - all classes added and no clear over/underfitting.")
 
+        # check if goal accuracy reached
+        if goal_accuracy is not None and val_accuracy >= goal_accuracy and current_class_index > goal_classes:
+            if debug:
+                print(f"Goal validation accuracy {goal_accuracy} reached at epoch {epoch}. Stopping training.")
+            break
+
 
     print(f"Parameters used: {parameters}")
     print(f"Training finished. Reached class index: {current_class_index}. Final train acc: {train_acc[-1]:.4f}, test acc: {val_acc[-1]:.4f}")
+    if goal_accuracy is not None:
+        return train_acc, val_acc, train_losses, val_losses
+    
     if current_class_index < goal_classes:
         return [0], [0], [0], [0]
     

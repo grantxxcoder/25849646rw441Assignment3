@@ -111,10 +111,10 @@ class DynamicMLP(nn.Module):
         for idx, layer in enumerate(self.hidden_layers):
             layer_type = type(layer).__name__
             if isinstance(layer, nn.Identity):
-                if self.debug:
-                    print(f" Layer {idx}: Identity (no neurons)")
+               
+                print(f" Layer {idx}: Identity (no neurons)")
             else:
-                if self.debug:
-                    print(f" Layer {idx}: {layer_type} with {layer.out_features} neurons")
-        if self.debug:
-            print(f" Output Layer: Linear with {self.output_layer.out_features} output classes")
+                
+                print(f" Layer {idx}: {layer_type} with {layer.out_features} neurons")
+        
+        print(f" Output Layer: Linear with {self.output_layer.out_features} output classes")
